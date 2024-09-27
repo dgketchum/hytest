@@ -1,87 +1,115 @@
 import os
 
-import numpy as np
-import xarray as xr
-from pygeohydro import NWIS
-from zarr.convenience import consolidate_metadata
 import dask
-from dask.distributed import Client
+import dataretrieval.nwis as nwis
+import geopandas as gpd
+import holoviews as hv
+import numpy as np
+import pandas as pd
+import xarray as xr
+import zarr
+import hvplot.xarray
 
+from dask.distributed import Client
+from zarr.convenience import consolidate_metadata
+
+hv.extension('bokeh')
 os.environ['USE_PYGEOS'] = '0'
 
+START = '2023-01-01'
+END = '2023-12-31'
 
-def prepare_streamflow_data(gages, outfile, start_time='1979-01-01', stop_time='2023-12-31'):
-    date_range = (start_time, stop_time)
 
-    nwis = NWIS()
-    observed = nwis.get_streamflow(gages[0:2], date_range, to_xarray=True)
+def prepare_streamflow_data(metadata, outfile):
+    gages = gpd.read_file(metadata)
+    gages = gages.iloc[:2]
+    gages['lat'] = gages['geometry'].y
+    gages['lon'] = gages['geometry'].x
 
-    observed = (observed
-                .rename_dims({'station_id': 'gage_id'})
-                .rename({'discharge': 'streamflow', 'station_id': 'gage_id'})
-                )
+    date_range = pd.date_range(START, END, freq='D')
+    dt_idx = pd.DatetimeIndex(date_range)
 
-    source_dataset = observed
-    template = (xr.zeros_like(source_dataset)
-    .chunk()
-    .isel(gage_id=0, drop=True)
-    .expand_dims(gage_id=len(gages), axis=-1)
-    .assign_coords({'gage_id': gages})
-    .chunk({
-        'time': len(observed.time),
-        'gage_id': 1}
-    )
-    )
+    dummy = xr.Dataset(
+        {'streamflow': (('time', 'gage_id'), np.ones((len(dt_idx), len(gages))) * np.nan)},
+        coords={'time': dt_idx,
+                'gage_id': gages['staid'],
+                'lat': gages['lat'],
+                'lon': gages['lon']})
 
-    template.to_zarr(
-        outfile,
-        compute=False,
-        encoding={
-            'station_nm': dict(_FillValue=None, dtype='<U64'),
-            'alt_datum_cd': dict(_FillValue=None, dtype='<U6'),
-            'alt_acy_va': dict(_FillValue=-2147483647, dtype=np.int32),
-            'alt_va': dict(_FillValue=9.96921e+36, dtype=np.float32),
-            'dec_lat_va': dict(_FillValue=None, dtype=np.float32),
-            'dec_long_va': dict(_FillValue=None, dtype=np.float32),
-            'streamflow': dict(_FillValue=9.96921e+36, dtype=np.float32)
-        },
+    store = zarr.DirectoryStore(outfile)
+
+    dummy.to_zarr(
+        store,
         consolidated=True,
-        mode='w'
-    )
+        compute=False,
+        encoding={'streamflow': {'_FillValue': np.nan},
+                  'lat': {'_FillValue': np.nan},
+                  'lon': {'_FillValue': np.nan}},
+        mode='w')
 
-    n_timesteps = len(observed.time)
-    time_steps = observed.time.values
-    client = Client()
-    results = dask.compute(*[dask.delayed(write_one_gage)(i, gages, date_range, time_steps, n_timesteps, outfile)
-                             for i in range(len(gages))], retries=10)
-    _ = consolidate_metadata(outfile)
-    client.close()
+    for j, (i, r) in enumerate(gages.iterrows()):
+        write_one_gage(j, r, outfile)
+
+    # client = Client()
+    # results = dask.compute(*[dask.delayed(write_one_gage)(j, r, outfile) for
+    #                          j, (i, r) in enumerate(gages.iterrows())], retries=10)
+    # _ = consolidate_metadata(outfile)
+    # client.close()
 
 
-def write_one_gage(n, gages, date_range, time_steps, n_timesteps, outfile):
-    site_id = gages[n]
+def write_one_gage(n, gage, outfile):
+    obs = nwis.get_record(sites=gage['staid'], service='dv', start=START, end=END)
     try:
-        nwis = NWIS()
+        obs = obs[['00060_Mean']]
+    except KeyError as e:
+        print(e, 'empty: ', obs.empty)
+        return None
 
-        _obs = nwis.get_streamflow(site_id, date_range, to_xarray=True).interp(time=time_steps)
-        _obs = _obs.rename_dims({'station_id': 'gage_id'}).rename({'station_id': 'gage_id', 'discharge': 'streamflow'})
-        _obs['station_nm'] = xr.DataArray(data=_obs['station_nm'].values.astype('<U64'), dims='gage_id')
-        _obs['alt_datum_cd'] = xr.DataArray(data=_obs['alt_datum_cd'].values.astype('<U6'), dims='gage_id')
+    obs[obs['00060_Mean'] < 0.0] = np.nan
+    obs.rename(columns={'00060_Mean': 'streamflow'}, inplace=True)
+    idx = pd.date_range(obs.index[0], obs.index[-1], freq='D')
+    obs = obs.reindex(idx)
 
-        _obs.to_zarr(
-            outfile,
-            region={
-                'time': slice(0, n_timesteps),
-                'gage_id': slice(n, n + 1)
-            }
-        )
-        return n
-    except Exception as e:
-        pass
+    if np.all(np.isnan(obs['streamflow'])):
+        print(f'{gage['staid']} is all nan')
+        return None
+
+    obs['time'] = obs.index
+
+    ds = xr.Dataset(
+        {'streamflow': ('time', obs['streamflow'])},
+        coords={'time': obs.index,
+                'gage_id': gage['staid']})
+
+    ds = ds.expand_dims('gage_id')
+
+    mf = '{:.1f}'.format(ds.streamflow.mean().item())
+    print(f'xarray {gage['staid']} mean flow: {mf}')
+
+    ds.to_zarr(
+        outfile,
+        region={'time': slice(0, len(obs.index)),
+                'gage_id': slice(n, n + 1)})
 
 
-# Main execution flow
+def verify(metadata, outfile, html_outfile):
+    dst = xr.open_dataset(outfile, engine='zarr', chunks={}, backend_kwargs=dict(consolidated=True))
+    gages = gpd.read_file(metadata)
+    gage_ids = gages['staid'].to_list()
+
+    for sid in gage_ids:
+        flow = dst.sel(gage_id=sid).streamflow.values
+        if np.isnan(flow).all():
+            print(f"No data found for gage ID {sid}.")
+
+        plot = dst['streamflow'].sel(gage_id=sid).hvplot(x='time', y='streamflow', grid=True)
+        hv.save(plot, filename=html_outfile.format(sid))
+
 if __name__ == "__main__":
-    os.environ['USE_PYGEOS'] = '0'
+    metadata_ = 'selected-streamflow-data-meta-merged.geojson'
+    out_file_ = 'nwis.zarr'
+    plot_file_ = 'hydrographs/hydrograph_{}.html'
+    prepare_streamflow_data(metadata_, out_file_)
+    verify(metadata_, out_file_, plot_file_)
 
 # ========================= EOF ====================================================================
