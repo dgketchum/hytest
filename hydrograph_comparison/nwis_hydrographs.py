@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import zarr
+# doesn't appear but is used
 import hvplot.xarray
+import matplotlib.pyplot as plt
 
 from dask.distributed import Client
 from zarr.convenience import consolidate_metadata
@@ -22,7 +24,7 @@ END = '2023-12-31'
 
 def prepare_streamflow_data(metadata, outfile):
     gages = gpd.read_file(metadata)
-    gages = gages.iloc[:2]
+    gages = gages.iloc[:100]
     gages['lat'] = gages['geometry'].y
     gages['lon'] = gages['geometry'].x
 
@@ -50,19 +52,15 @@ def prepare_streamflow_data(metadata, outfile):
     for j, (i, r) in enumerate(gages.iterrows()):
         write_one_gage(j, r, outfile)
 
-    # client = Client()
-    # results = dask.compute(*[dask.delayed(write_one_gage)(j, r, outfile) for
-    #                          j, (i, r) in enumerate(gages.iterrows())], retries=10)
-    # _ = consolidate_metadata(outfile)
-    # client.close()
-
 
 def write_one_gage(n, gage, outfile):
-    obs = nwis.get_record(sites=gage['staid'], service='dv', start=START, end=END)
     try:
-        obs = obs[['00060_Mean']]
+        obs = nwis.get_record(sites=gage['staid'], service='dv', start=START, end=END)
+    except ValueError:
+        return
+    try:
+        obs = obs[['00060_Mean']].copy()
     except KeyError as e:
-        print(e, 'empty: ', obs.empty)
         return None
 
     obs[obs['00060_Mean'] < 0.0] = np.nan
@@ -82,34 +80,46 @@ def write_one_gage(n, gage, outfile):
                 'gage_id': gage['staid']})
 
     ds = ds.expand_dims('gage_id')
-
-    mf = '{:.1f}'.format(ds.streamflow.mean().item())
-    print(f'xarray {gage['staid']} mean flow: {mf}')
-
     ds.to_zarr(
         outfile,
         region={'time': slice(0, len(obs.index)),
                 'gage_id': slice(n, n + 1)})
+    print(gage['staid'])
 
 
-def verify(metadata, outfile, html_outfile):
+def verify(metadata, outfile, html_outfile, write_html=True):
     dst = xr.open_dataset(outfile, engine='zarr', chunks={}, backend_kwargs=dict(consolidated=True))
     gages = gpd.read_file(metadata)
     gage_ids = gages['staid'].to_list()
 
     for sid in gage_ids:
-        flow = dst.sel(gage_id=sid).streamflow.values
-        if np.isnan(flow).all():
-            print(f"No data found for gage ID {sid}.")
+        try:
+            flow = dst.sel(gage_id=sid).streamflow.values
+            if np.isnan(flow).all():
+                # print(f"No data found for gage ID {sid}.")
+                continue
 
-        plot = dst['streamflow'].sel(gage_id=sid).hvplot(x='time', y='streamflow', grid=True)
-        hv.save(plot, filename=html_outfile.format(sid))
+            if write_html:
+                plot = dst['streamflow'].sel(gage_id=sid).hvplot(x='time', y='streamflow', grid=True)
+                hv.save(plot, filename=html_outfile.format(sid))
+            else:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                dst['streamflow'].sel(gage_id=sid).plot(ax=ax)
+                ax.set_title(f'Hydrograph for Gage {sid}')
+                ax.grid(True)
+                plt.savefig(html_outfile.format(sid).replace('.html', '.png'))
+                plt.close(fig)
+
+        except KeyError as e:
+            # print(e, sid, 'error')
+            continue
+
 
 if __name__ == "__main__":
     metadata_ = 'selected-streamflow-data-meta-merged.geojson'
     out_file_ = 'nwis.zarr'
     plot_file_ = 'hydrographs/hydrograph_{}.html'
     prepare_streamflow_data(metadata_, out_file_)
-    verify(metadata_, out_file_, plot_file_)
+    # verify(metadata_, out_file_, plot_file_, write_html=False)
 
 # ========================= EOF ====================================================================
