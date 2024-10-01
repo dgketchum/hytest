@@ -1,40 +1,52 @@
-import xarray as xr
-import pandas as pd
-from datetime import datetime
+import dask
+import fsspec
+import geopandas as gpd
 import s3fs
+import xarray as xr
+from dask.distributed import Client
 
 
-# https://noaa-nwm-retrospective-3-0-pds.s3.amazonaws.com/CONUS/netcdf/CHRTOUT/1979/197902010100.CHRTOUT_DOMAIN1
+def download_nwm_data(metadata, t_chunk=672, id_chunk=1000):
+    gages = gpd.read_file(metadata)
+    gages = gages.iloc[:100]
+    gages['lat'] = gages['geometry'].y
+    gages['lon'] = gages['geometry'].x
 
-def download_subset_from_s3(station_ids, date_range):
-    s3 = s3fs.S3FileSystem(anon=True)
-    base_path = "noaa-nwm-retrospective-3-0-pds/CONUS/netcdf/CHRTOUT/"
+    # url = 's3://noaa-nwm-retrospective-3-0-pds'
+    url = 's3://noaa-nwm-retro-v2-zarr-pds'
 
-    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-    date_range = pd.date_range(start_date, end_date, freq='H')
 
-    s3 = s3fs.S3FileSystem(anon=True, client_kwargs={'endpoint_url': 'https://s3.us-east-1.amazonaws.com'})
+    fs = fsspec.filesystem('s3', anon=True)
+    ds = xr.open_zarr(fs.get_mapper(url), consolidated=True)
 
-    file_paths = []
-    for date in date_range:
-        date_str = date.strftime('%Y/%Y%m%d%H00')
-        if int(date.strftime('%Y%m%d%H00')) < 197902010100:
-            continue
+    idx = ((ds.latitude > 44.0) & (ds.latitude < 48.0) &
+           (ds.longitude > -114.5) & (ds.longitude < -113.5))
 
-        s3_path = f"{base_path}{date_str}.CHRTOUT_DOMAIN1"
+    with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+        ds_out = ds[['streamflow']].isel(feature_id=idx).sel(time=slice('2023-01-01', '2023-12-31'))
 
-        file_paths.append(s3_path)
-        ds = xr.open_mfdataset(file_paths,
-                               combine='by_coords',
-                               mask_and_scale=True,
-                               decode_cf=True,
-                               chunks='auto')
+    def gchunks(ds_chunk, chunks):
+        group_chunks = {}
+        for var in ds_chunk.variables:
+            group_chunks[var] = []
+            for di in ds_chunk[var].dims:
+                if di in chunks.keys():
+                    group_chunks[var].append(min(chunks[di], len(ds_chunk[di])))
+                else:
+                    group_chunks[var].append(len(ds_chunk[di]))
+            ds_chunk[var] = ds_chunk[var].chunk(tuple(group_chunks[var]))
+            group_chunks[var] = {'chunks': tuple(group_chunks[var])}
+        return group_chunks
+
+    encoding = gchunks(ds_out, {'time': t_chunk, 'feature_id': id_chunk})
+
+    ds_out.to_zarr('nwm.zarr', mode='w', encoding=encoding)
+    a = 1
 
 
 if __name__ == '__main__':
-    station_ids = pd.read_csv('vetted_gages.csv')['staid'].to_list()
-    date_range = ('1979-01-01', '2023-12-31')
-    subset_data = download_subset_from_s3(station_ids, date_range)
-    print(subset_data)
+    metadata_ = 'selected-streamflow-data-meta-merged.geojson'
+    date_range_ = ('2023-01-01', '2023-12-31')
+    download_nwm_data(metadata_)
 
 # ========================= EOF ====================================================================
