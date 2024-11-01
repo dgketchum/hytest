@@ -1,9 +1,20 @@
+import boto3
+import botocore
 import dask
 import fsspec
 import geopandas as gpd
-import s3fs
 import xarray as xr
 from dask.distributed import Client
+
+
+def list_s3_bucket_contents(bucket_name='noaa-nwm-retro-v2-zarr-pds'):
+
+    s3 = boto3.client('s3', config=botocore.client.Config(signature_version=botocore.UNSIGNED))
+
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket_name):
+        for obj in page.get('Contents', []):
+            print(obj['Key'])
 
 
 def download_nwm_data(metadata, t_chunk=672, id_chunk=1000):
@@ -12,12 +23,13 @@ def download_nwm_data(metadata, t_chunk=672, id_chunk=1000):
     gages['lat'] = gages['geometry'].y
     gages['lon'] = gages['geometry'].x
 
+    client = Client(n_workers=8)
+
     # url = 's3://noaa-nwm-retrospective-3-0-pds'
-    url = 's3://noaa-nwm-retro-v2-zarr-pds'
+    url = 's3://hytest/tutorials/evaluation/nwm'
+    # url = 's3://noaa-nwm-retro-v2-zarr-pds'
 
-
-    fs = fsspec.filesystem('s3', anon=True)
-    ds = xr.open_zarr(fs.get_mapper(url), consolidated=True)
+    ds = xr.open_zarr(fsspec.get_mapper(url, anon=True), consolidated=True)
 
     idx = ((ds.latitude > 44.0) & (ds.latitude < 48.0) &
            (ds.longitude > -114.5) & (ds.longitude < -113.5))
