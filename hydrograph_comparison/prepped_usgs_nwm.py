@@ -1,16 +1,18 @@
-import calendar
 import concurrent
 import os
-from datetime import datetime
-import pandas as pd
+
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import xarray as xr
 from scipy.spatial import cKDTree
 
+COLS = ['SOURCE_FEA', 'FLComID', 'feature_ids', 'latitude', 'longitude',
+        'distance_km', 'gnis_name']
+
 
 def get_prepped_usgs_nwm(metadata, out_data, nc, nwm_fabric, workers=8, overwrite=False, debug=False,
-                         bounds=None):
+                         bounds=None, subselection=None):
     """Extract NWM hydrographs from prepped nc data found at:
     https://www.sciencebase.gov/catalog/item/612e264ed34e40dd9c091228
     """
@@ -51,31 +53,37 @@ def get_prepped_usgs_nwm(metadata, out_data, nc, nwm_fabric, workers=8, overwrit
                                                                     r['feature_lats'], r['feature_lons']), axis=1)
 
     gages['gnis_name'] = [nwm.loc[i, 'gnis_name'] for i in gages['feature_ids']]
-    out_csv = os.path.join(out_data, 'usgs_nwm_matches_unfiltered.csv')
+    gages = gages[COLS]
+    gages = gages.rename(columns={'SOURCE_FEA': 'staid'})
+    gages = gages[gages['FLComID'] == gages['feature_ids']]
+    out_csv = os.path.join(out_data, 'usgs_nwm_ID_matched.csv')
     gages.to_csv(out_csv)
 
     gage_ids = gages['staid'].values
+    feature_ids = gages['feature_ids'].values
+    staids = [(f, g) for f, g in zip(feature_ids, gage_ids)]
 
-    staids = [(nearest_feature_ids[i], gage_ids[i]) for i in range(len(nearest_feature_ids))]
-    ds_subset = ds.sel(feature_id=xr.DataArray(nearest_feature_ids, dims='station'))
-    ds_subset = ds_subset.assign_coords(feature_id=nearest_feature_ids)
+    if subselection:
+        staids = [t for t in staids if t[1] in subselection]
+        sub_idx = [i for i, r in gages.iterrows() if r['staid'] in subselection]
+        gages = gages.loc[sub_idx]
+        out_csv = os.path.join(out_data, 'usgs_nwm_ID_matched_subselection.csv')
+        gages.to_csv(out_csv, index=False)
 
     if debug:
         for staid in staids:
-            process_fid(staid, ds_subset.copy(), out_data, overwrite)
+            process_fid(staid, ds, out_data, overwrite)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(process_fid, staid, ds_subset.copy(), out_data, overwrite)
+            futures = [executor.submit(process_fid, staid, ds, out_data, overwrite)
                        for staid in staids]
             concurrent.futures.wait(futures)
 
 
 def process_fid(fid, ds, out_data, overwrite):
     feature_id, station_id = fid
-    dst_dir = os.path.join(out_data, station_id)
-    if not os.path.exists(dst_dir):
-        os.mkdir(dst_dir)
-    _file = os.path.join(dst_dir, '{}.csv'.format(station_id))
+
+    _file = os.path.join(out_data, 'blodgett_prepped', '{}.csv'.format(station_id))
 
     if not os.path.exists(_file) or overwrite:
         df_station = ds.sel(feature_id=feature_id)['streamflow'].to_dataframe()
@@ -106,10 +114,14 @@ if __name__ == '__main__':
         home = os.path.expanduser('~')
         d = os.path.join(home, 'data', 'IrrigationGIS')
 
+    metadata_ = 'selected-streamflow-data-meta-merged.geojson'
+    gages = gpd.read_file(metadata_)['staid'].tolist()
+
     metadata_ = os.path.join(d, 'usgs_gages', 'GageLoc', 'GageLoc.shp')
-    out_dir = os.path.join(d, 'usgs_gages', 'nwm_')
-    nc_ = os.path.join(home, 'Downloads', 'nwmv21_nwis.nc')
-    csv = os.path.join(home, 'Downloads', 'NWM_channel_hydrofabric', 'nwm_hydrofabric.csv')
-    get_prepped_usgs_nwm(metadata_, out_dir, nc_, csv, bounds=None)
+    out_dir = os.path.join(d, 'nwm', 'hydrographs')
+    nc_ = os.path.join(d, 'nwm', 'output', 'nwmv21_nwis.nc')
+    csv = os.path.join(d, 'nwm', 'nwm_hydrofabric.csv')
+    get_prepped_usgs_nwm(metadata_, out_dir, nc_, csv, bounds=None, debug=False,
+                         workers=8, subselection=gages)
 
 # ========================= EOF ====================================================================
