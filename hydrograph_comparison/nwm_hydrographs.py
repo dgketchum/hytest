@@ -1,5 +1,6 @@
-import calendar
 import os
+import calendar
+import concurrent
 
 import dask
 import fsspec
@@ -19,7 +20,7 @@ def extract_nwm_data(metadata, out_data, nwm_fabric, workers=8, overwrite=False,
     """
     This function takes a list of USGS gages, finds the closest National Water Model stream segment, and
     extracts the daily streamflow NWM model output at that reach, month to month. This should be run in an
-    AWS EC2 instance (us-west-2). This is intended to follow the use of prepped_usgs_nwm.py, which access pre-processed
+    AWS EC2 instance (us-east-1). This is intended to follow the use of prepped_usgs_nwm.py, which access pre-processed
     time series of the same model output that has been clipped and rechunked for streamflow extraction. This codes
     uses the entire NWM output and is thus much slower. Further, the results of this function should be inspected in
     'usgs_nwm_matches_unverified.csv' or  'usgs_nwm_matches_unverified_subsel.csv', as the proximity selection
@@ -29,7 +30,7 @@ def extract_nwm_data(metadata, out_data, nwm_fabric, workers=8, overwrite=False,
     Args:
         metadata: Geojson or shapefile of sought gages.
         out_data: Ouput directory.
-        nwm_fabric: NWM fabric has GNIS names th
+        nwm_fabric: NWM fabric has GNIS names that help determine if the match is correct
         workers:
         overwrite:
         debug:
@@ -53,15 +54,11 @@ def extract_nwm_data(metadata, out_data, nwm_fabric, workers=8, overwrite=False,
         gages = gages[(gages['longitude'] < e) & (gages['longitude'] >= w)]
         print('dropped {} stations outside bounds'.format(ln - gages.shape[0]))
 
-    else:
-        w, s, e, n = (-125.0, 25.0, -67.0, 53.0)
-        gages = gages[(gages['latitude'] < n) & (gages['latitude'] >= s)]
-        gages = gages[(gages['longitude'] < e) & (gages['longitude'] >= w)]
-        print('dropped {} stations outside NLDAS-2 extent'.format(ln - gages.shape[0]))
+    client = Client(n_workers=workers,
+                    memory_limit='184GB')
 
-    client = Client(n_workers=workers)
     ds = xr.open_zarr(fsspec.get_mapper(URL, anon=True), consolidated=True)
-
+    ds = ds.persist()
     ds_latitudes = ds['latitude'].values
     ds_longitudes = ds['longitude'].values
     feature_ids = ds['feature_id'].values
@@ -87,7 +84,6 @@ def extract_nwm_data(metadata, out_data, nwm_fabric, workers=8, overwrite=False,
 
     if complete:
         sub_idx = [i for i, r in gages.iterrows() if r['staid'] not in complete]
-        print(len(sub_idx))
         gages = gages.loc[sub_idx]
         out_csv = os.path.join(out_data, 'usgs_nwm_matches_unverified_subsel.csv')
         gages.to_csv(out_csv)
@@ -98,30 +94,29 @@ def extract_nwm_data(metadata, out_data, nwm_fabric, workers=8, overwrite=False,
 
     print(f'{len(staids)} stations to process')
 
-    ds = None
     dates = [(year, month, calendar.monthrange(year, month)[-1])
-             for year in range(1990, 2020) for month in range(1, 13)]
+             for year in range(1997, 2020) for month in range(1, 13)]
 
     if debug:
-        get_month_flows(staids, dates[0], out_data, overwrite)
+        for date in dates:
+            get_month_flows(staids, date, out_data, overwrite)
         return
     else:
-        delayed_results = [dask.delayed(get_month_flows)(staids, dt, out_data, overwrite)
+        delayed_results = [dask.delayed(get_month_flows)(ds, staids, dt, out_data, overwrite)
                            for dt in dates]
         dask.compute(*delayed_results)
 
 
-def get_month_flows(staids, dates, out_data, overwrite):
-    year, month, month_end = dates
-    ds = xr.open_zarr(fsspec.get_mapper(URL, anon=True), consolidated=True)
-    ds_subset = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
+def get_month_flows(ds_subset, staids, date_, out_data, overwrite):
+    year, month, month_end = date_
+    ds_subset = ds_subset.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
     feature_ids = [x[0] for x in staids]
     ds_subset = ds_subset.sel(feature_id=xr.DataArray(feature_ids, dims='station'))
     ds_subset = ds_subset.assign_coords(feature_id=feature_ids)
     date_string = f'{year}{month}'
     for staid in staids:
         feature_id, station_id = staid
-        dst_dir = os.path.join(out_data, station_id)
+        dst_dir = os.path.join(out_data, 'monthly', station_id)
         if not os.path.exists(dst_dir):
             os.mkdir(dst_dir)
         _file = os.path.join(dst_dir, '{}_{}.csv'.format(station_id, date_string))
@@ -154,12 +149,13 @@ if __name__ == '__main__':
         home = os.path.expanduser('~')
         d = os.path.join(home, 'data', 'IrrigationGIS')
 
-    out_dir = os.path.join(d, 'nwm', 'hydrographs', 'monthly')
+    out_dir = os.path.join(d, 'nwm', 'hydrographs')
     csv = os.path.join(d, 'nwm', 'nwm_hydrofabric.csv')
     usgs_prepped = os.path.join(d, 'nwm', 'hydrographs', 'usgs_nwm_ID_matched_subselection.csv')
-    proc_gages = pd.read_csv(usgs_prepped,  dtype={'staid': str})['staid'].tolist()
+    proc_gages = pd.read_csv(usgs_prepped, dtype={'staid': str})['staid'].tolist()
 
     metadata_ = os.path.join(d, 'nwm', 'selected-streamflow-data-meta-merged.geojson')
-    extract_nwm_data(metadata_, out_dir, complete=proc_gages, bounds=None, nwm_fabric=csv, debug=True)
+    extract_nwm_data(metadata_, out_dir, complete=proc_gages, bounds=None, nwm_fabric=csv, debug=False,
+                     workers=24)
 
 # ========================= EOF ====================================================================
