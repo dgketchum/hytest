@@ -44,30 +44,28 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
 
     if debug:
         for date in dates:
-            get_month_met(ds, fids, date, out_data, overwrite, )
+            get_month_met(ds, indexer, fids, date, out_data, overwrite, )
         return
     else:
-        delayed_results = [dask.delayed(get_month_met)(ds, fids, dt, out_data, overwrite)
+        delayed_results = [dask.delayed(get_month_met)(ds, indexer, fids, dt, out_data, overwrite)
                            for dt in dates]
         dask.compute(*delayed_results)
 
 
-def get_month_met(ds_subset, staids, date_, out_data, overwrite):
+def get_month_met(ds_subset, indexer_, fids, date_, out_data, overwrite):
     year, month, month_end = date_
     ds_subset = ds_subset.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
-    feature_ids = [x[0] for x in staids]
-    ds_subset = ds_subset.sel(feature_id=xr.DataArray(feature_ids, dims='station'))
-    ds_subset = ds_subset.assign_coords(feature_id=feature_ids)
+    ds_subset = ds_subset.sel(lat=indexer_.lat, lon=indexer_.lon, method='nearest')
+
     date_string = f'{year}{month}'
-    for staid in staids:
-        feature_id, station_id = staid
-        dst_dir = os.path.join(out_data, 'monthly', station_id)
+    for fid in fids:
+        dst_dir = os.path.join(out_data, 'monthly', fid)
         if not os.path.exists(dst_dir):
             os.mkdir(dst_dir)
-        _file = os.path.join(dst_dir, '{}_{}.csv'.format(station_id, date_string))
+        _file = os.path.join(dst_dir, '{}_{}.csv'.format(fid, date_string))
 
         if not os.path.exists(_file) or overwrite:
-            df_station = ds_subset.sel(feature_id=feature_id)['streamflow'].to_dataframe()
+            df_station = ds_subset.sel(feature_id=fid)['streamflow'].to_dataframe()
             df_station = df_station.groupby(df_station.index.get_level_values('time')).first()
             df_station['dt'] = [i.strftime('%Y%m%d%H') for i in df_station.index]
             df_station.to_csv(_file, index=False)
@@ -89,6 +87,6 @@ if __name__ == '__main__':
     csv_files = os.path.join(c404, 'station_data')
     p_files = '/data/ssd2/nldas2/parquet/'
 
-    extract_conus404(sites, zarr_store, csv_files, workers=24)
+    extract_conus404(sites, zarr_store, csv_files, workers=24, debug=True)
 
 # ========================= EOF ====================================================================
