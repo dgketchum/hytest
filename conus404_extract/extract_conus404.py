@@ -1,12 +1,9 @@
 import calendar
 import os
-
-import dask
-import dask.distributed
+import concurrent.futures
 import numpy as np
 import pandas as pd
 import xarray as xr
-from dask.distributed import Client
 
 
 def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bounds=None,
@@ -15,9 +12,6 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
     if 'LAT' in station_list.columns:
         station_list = station_list.rename(columns={'STAID': 'fid', 'LAT': 'latitude', 'LON': 'longitude'})
     station_list.index = station_list['fid']
-
-    client = Client(n_workers=workers,
-                    memory_limit='256GB')
 
     if bounds:
         w, s, e, n = bounds
@@ -44,32 +38,35 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
 
     if debug:
         for date in dates:
-            get_month_met(ds, indexer, fids, date, out_data, overwrite, )
+            get_month_met(ds, indexer, variables, fids, date, out_data, overwrite)
         return
     else:
-        delayed_results = [dask.delayed(get_month_met)(ds, indexer, fids, dt, out_data, overwrite)
-                           for dt in dates]
-        dask.compute(*delayed_results)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+
+            futures = [executor.submit(get_month_met, ds, indexer, variables, fids, dt, out_data, overwrite)
+                               for dt in dates]
+            concurrent.futures.wait(futures)
 
 
-def get_month_met(ds_subset, indexer_, fids, date_, out_data, overwrite):
+def get_month_met(ds_subset, indexer_, variables_, fids, date_, out_data, overwrite):
     year, month, month_end = date_
+    ds_subset = ds_subset[variables_]
     ds_subset = ds_subset.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
-    ds_subset = ds_subset.sel(lat=indexer_.lat, lon=indexer_.lon, method='nearest')
-
+    ds_subset = ds_subset.sel(y=indexer_.lat, x=indexer_.lon, method='nearest')
+    df_all = ds_subset.to_dataframe()
     date_string = f'{year}{month}'
     for fid in fids:
-        dst_dir = os.path.join(out_data, 'monthly', fid)
+
+        dst_dir = os.path.join(out_data, fid)
         if not os.path.exists(dst_dir):
             os.mkdir(dst_dir)
         _file = os.path.join(dst_dir, '{}_{}.csv'.format(fid, date_string))
 
         if not os.path.exists(_file) or overwrite:
-            df_station = ds_subset.sel(feature_id=fid)['streamflow'].to_dataframe()
+            df_station = df_all.loc[slice(None), fid]
             df_station = df_station.groupby(df_station.index.get_level_values('time')).first()
             df_station['dt'] = [i.strftime('%Y%m%d%H') for i in df_station.index]
             df_station.to_csv(_file, index=False)
-            print(_file)
 
 
 if __name__ == '__main__':
@@ -87,6 +84,6 @@ if __name__ == '__main__':
     csv_files = os.path.join(c404, 'station_data')
     p_files = '/data/ssd2/nldas2/parquet/'
 
-    extract_conus404(sites, zarr_store, csv_files, workers=24, debug=True)
+    extract_conus404(sites, zarr_store, csv_files, workers=24, debug=False)
 
 # ========================= EOF ====================================================================
