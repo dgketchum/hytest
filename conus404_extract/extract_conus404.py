@@ -48,6 +48,7 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
         cluster = LocalCluster(n_workers=workers)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
+        station_list = client.scatter(station_list)
         tasks = [dask.delayed(get_month_met)(nc_data, station_list, date, out_data, overwrite) for date in dates]
         dask.compute(*tasks)
         client.close()
