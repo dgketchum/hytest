@@ -5,13 +5,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import xoak
-# import dask
-# from dask.diagnostics import ProgressBar
-# from dask.distributed import Client, LocalCluster
+import dask
+from dask.diagnostics import ProgressBar
+from dask.distributed import Client, LocalCluster
 
 
-def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bounds=None,
-                     debug=False):
+def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bounds=None, mode='multi',
+                     start_yr=2000, end_yr=2023):
     station_list = pd.read_csv(stations)
     if 'LAT' in station_list.columns:
         station_list = station_list.rename(columns={'STAID': 'fid', 'LAT': 'latitude', 'LON': 'longitude'})
@@ -33,7 +33,7 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
     station_list = station_list.to_xarray()
     fids = np.unique(station_list.fid.values).tolist()
     dates = [(year, month, calendar.monthrange(year, month)[-1])
-             for year in range(2000, 2024) for month in range(1, 13)]
+             for year in range(start_yr, end_yr + 1) for month in range(1, 13)]
 
     variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
     ds = xr.open_zarr(nc_data, consolidated=True)
@@ -42,15 +42,26 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
     ds = ds.xoak.sel(lat=station_list.latitude, lon=station_list.longitude)
     ds = xr.merge([station_list, ds])
 
-    if debug:
+    if mode == 'debug':
         for date in dates:
             get_month_met(ds, fids, date, out_data, overwrite)
         return
-    else:
+
+    elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(get_month_met, ds, fids, dt, out_data, overwrite)
                        for dt in dates]
             concurrent.futures.wait(futures)
+
+    elif mode == 'dask':
+        cluster = LocalCluster(n_workers=workers)
+        client = Client(cluster)
+        print("Dask cluster started with dashboard at:", client.dashboard_link)
+
+        tasks = [dask.delayed(get_month_met)(ds, fids, date, out_data, overwrite) for date in dates]
+        dask.compute(*tasks)
+
+        client.close()
 
 
 def get_month_met(ds_subset, fids, date_, out_data, overwrite):
@@ -86,12 +97,8 @@ if __name__ == '__main__':
     ghcn = os.path.join(d, 'climate', 'ghcn')
 
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
-
-    # sites = ghcn_CANUSA_stations_mgrs.csv'
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
-
     csv_files = os.path.join(c404, 'station_data')
-    p_files = '/data/ssd2/nldas2/parquet/'
-    extract_conus404(sites, zarr_store, csv_files, workers=12, debug=False)
+    extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
 
 # ========================= EOF ====================================================================
