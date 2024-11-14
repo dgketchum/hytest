@@ -7,7 +7,6 @@
 #SBATCH --account=wymtwsc
 #SBATCH --time=12:00:00
 #SBATCH --output=conus_extract.out
-#SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dketchum@usgs.gov
 #SBATCH --mem=512G
 
