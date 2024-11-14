@@ -36,7 +36,7 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
              for year in range(start_yr, end_yr + 1) for month in range(1, 13)]
 
     variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
-    ds = xr.open_zarr(nc_data, consolidated=True)
+    ds = xr.open_zarr(nc_data, consolidated=True, chunks='auto')
     ds = ds[variables]
     ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
     ds = ds.xoak.sel(lat=station_list.latitude, lon=station_list.longitude)
