@@ -99,6 +99,17 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
     del ds
 
 
+def get_quadrants(b):
+    mid_longitude = (b[0] + b[2]) / 2
+    mid_latitude = (b[1] + b[3]) / 2
+    quadrant_nw = (b[0], mid_latitude, mid_longitude, b[3])
+    quadrant_ne = (mid_longitude, mid_latitude, b[2], b[3])
+    quadrant_sw = (b[0], b[1], mid_longitude, mid_latitude)
+    quadrant_se = (mid_longitude, b[1], b[2], mid_latitude)
+    quadrants = [quadrant_nw, quadrant_ne, quadrant_sw, quadrant_se]
+    return quadrants
+
+
 if __name__ == '__main__':
     r = '/caldera/hovenweep/projects/usgs/water'
     d = os.path.join(r, 'wymtwsc', 'dketchum')
@@ -109,6 +120,16 @@ if __name__ == '__main__':
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
     csv_files = os.path.join(c404, 'station_data')
-    extract_conus404(sites, zarr_store, csv_files, workers=12, mode='dask')
+
+    bounds = (-125.0, 25.0, -67.0, 53.0)
+    quadrants = get_quadrants(bounds)
+    sixteens = [get_quadrants(q) for q in quadrants]
+    sixteens = [x for xs in sixteens for x in xs]
+
+    for e, sector in enumerate(sixteens, start=1):
+
+        print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
+
+        extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
 
 # ========================= EOF ====================================================================
