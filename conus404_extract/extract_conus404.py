@@ -30,26 +30,17 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
 
     print(f'{len(station_list)} stations to write')
 
-    station_list = station_list.to_xarray()
-    fids = np.unique(station_list.fid.values).tolist()
     dates = [(year, month, calendar.monthrange(year, month)[-1])
              for year in range(start_yr, end_yr + 1) for month in range(1, 13)]
 
-    variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
-    ds = xr.open_zarr(nc_data, consolidated=True, chunks='auto')
-    ds = ds[variables]
-    ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
-    ds = ds.xoak.sel(lat=station_list.latitude, lon=station_list.longitude)
-    ds = xr.merge([station_list, ds])
-
     if mode == 'debug':
         for date in dates:
-            get_month_met(ds, fids, date, out_data, overwrite)
+            get_month_met(nc_data, station_list, date, out_data, overwrite)
         return
 
     elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(get_month_met, ds, fids, dt, out_data, overwrite)
+            futures = [executor.submit(get_month_met, nc_data, station_list, dt, out_data, overwrite)
                        for dt in dates]
             concurrent.futures.wait(futures)
             return
@@ -58,19 +49,34 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
         cluster = LocalCluster(n_workers=workers, threads_per_worker=1)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
-
-        tasks = [dask.delayed(get_month_met)(ds, fids, date, out_data, overwrite) for date in dates]
+        station_list = client.scatter(station_list)
+        tasks = [dask.delayed(get_month_met)(nc_data, station_list, date, out_data, overwrite) for date in dates]
         dask.compute(*tasks)
         client.close()
 
 
-def get_month_met(ds_subset, fids, date_, out_data, overwrite):
+def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
+    """"""
     year, month, month_end = date_
     date_string = '{}-{}'.format(year, str(month).rjust(2, '0'))
-    print(f'selecting data from {date_string}')
-    ds_subset = ds_subset.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
-    all_df = ds_subset.to_dataframe()
+
+    variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
+    fids = station_list_.index.to_list()
+    station_list_ = station_list_.to_xarray()
+
+    print(f'read zarr {date_string} ')
+    ds = xr.open_zarr(nc_data_, consolidated=True, chunks='auto')
+    print(f'select time {date_string} ')
+    ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
+    ds = ds[variables]
+    print(f'index stations {date_string} ')
+    ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
+    ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude)
+    ds = xr.merge([station_list_, ds])
+
+    all_df = ds.to_dataframe()
     print(f'write {date_string} from dataframe...')
+
     try:
         ct = 0
         for fid in fids:
