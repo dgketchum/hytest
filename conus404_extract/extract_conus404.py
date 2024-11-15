@@ -45,7 +45,7 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
             concurrent.futures.wait(futures)
 
     elif mode == 'dask':
-        cluster = LocalCluster(n_workers=workers)
+        cluster = LocalCluster(n_workers=workers, memory_limit='32GB', threads_per_worker=1)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
@@ -104,6 +104,6 @@ if __name__ == '__main__':
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
     csv_files = os.path.join(c404, 'station_data')
-    extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
+    extract_conus404(sites, zarr_store, csv_files, workers=12, mode='dask')
 
 # ========================= EOF ====================================================================

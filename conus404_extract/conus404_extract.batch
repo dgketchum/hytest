@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=extract_conus404
 #SBATCH --nodes=1
-#SBATCH --ntasks=36
+#SBATCH --ntasks=12
 #SBATCH --partition=cpu
 #SBATCH --account=wymtwsc
 #SBATCH --time=12:00:00
