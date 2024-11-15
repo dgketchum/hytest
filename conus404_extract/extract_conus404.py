@@ -52,15 +52,15 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
             futures = [executor.submit(get_month_met, ds, fids, dt, out_data, overwrite)
                        for dt in dates]
             concurrent.futures.wait(futures)
+            return
 
     elif mode == 'dask':
-        cluster = LocalCluster(n_workers=workers)
+        cluster = LocalCluster(n_workers=workers, threads_per_worker=1)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
 
         tasks = [dask.delayed(get_month_met)(ds, fids, date, out_data, overwrite) for date in dates]
         dask.compute(*tasks)
-
         client.close()
 
 
