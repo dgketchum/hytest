@@ -1,4 +1,5 @@
 import calendar
+import logging
 import os
 import concurrent.futures
 import numpy as np
@@ -46,7 +47,8 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
             return
 
     elif mode == 'dask':
-        cluster = LocalCluster(n_workers=workers, threads_per_worker=1)
+        cluster = LocalCluster(n_workers=workers, memory_limit='32GB', threads_per_worker=1,
+                               silence_logs=logging.ERROR)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
@@ -93,10 +95,13 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite, bounds_=N
                 df_station = df_station.groupby(df_station.index.get_level_values('time')).first()
                 df_station['dt'] = [i.strftime('%Y%m%d%H') for i in df_station.index]
                 df_station.to_parquet(_file, index=False)
+                ct += 1
         if ct % 1000 == 0.:
             print(f'{ct} for {date_string}')
     except Exception as exc:
         print(f'{date_string}: {exc}')
+
+    del ds
 
 
 def get_quadrants(b):
@@ -123,11 +128,12 @@ if __name__ == '__main__':
 
     bounds = (-125.0, 25.0, -67.0, 53.0)
     quadrants = get_quadrants(bounds)
-    sixteens = [get_quadrants(b) for b in quadrants]
-    sixteens = [i for l in sixteens for i in l]
+    sixteens = [get_quadrants(q) for q in quadrants]
+    sixteens = [x for xs in sixteens for x in xs]
 
-    for e, quad in enumerate(quadrants, start=1):
-        print(f'\n\n\n\n Quadrant {e} \n\n\n\n')
+    for e, sector in enumerate(sixteens, start=1):
+
+        print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
         extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
 
