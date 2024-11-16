@@ -35,12 +35,12 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
 
     if mode == 'debug':
         for date in dates:
-            get_month_met(nc_data, station_list, date, out_data, overwrite)
+            get_month_met(nc_data, station_list, date, out_data, overwrite, bounds)
         return
 
     elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(get_month_met, nc_data, station_list, dt, out_data, overwrite)
+            futures = [executor.submit(get_month_met, nc_data, station_list, dt, out_data, overwrite, bounds)
                        for dt in dates]
             concurrent.futures.wait(futures)
             return
@@ -50,12 +50,13 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
-        tasks = [dask.delayed(get_month_met)(nc_data, station_list, date, out_data, overwrite) for date in dates]
+        tasks = [dask.delayed(get_month_met)(nc_data, station_list, date, out_data, overwrite, bounds) for date in
+                 dates]
         dask.compute(*tasks)
         client.close()
 
 
-def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
+def get_month_met(nc_data_, station_list_, date_, out_data, overwrite, bounds_=None):
     """"""
     year, month, month_end = date_
     date_string = '{}-{}'.format(year, str(month).rjust(2, '0'))
@@ -69,6 +70,9 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
     print(f'select time {date_string} ')
     ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
     ds = ds[variables]
+    if bounds_ is not None:
+        ds = ds.sel(lat=slice(bounds_[1], bounds_[2]),
+                    lon=slice(bounds_[0], bounds_[2]))
     print(f'index stations {date_string} ')
     ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
     ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude)
@@ -95,6 +99,17 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
         print(f'{date_string}: {exc}')
 
 
+def get_quadrants(b):
+    mid_longitude = (b[0] + b[2]) / 2
+    mid_latitude = (b[1] + b[3]) / 2
+    quadrant_nw = (b[0], mid_latitude, mid_longitude, b[3])
+    quadrant_ne = (mid_longitude, mid_latitude, b[2], b[3])
+    quadrant_sw = (b[0], b[1], mid_longitude, mid_latitude)
+    quadrant_se = (mid_longitude, b[1], b[2], mid_latitude)
+    quadrants = [quadrant_nw, quadrant_ne, quadrant_sw, quadrant_se]
+    return quadrants
+
+
 if __name__ == '__main__':
     r = '/caldera/hovenweep/projects/usgs/water'
     d = os.path.join(r, 'wymtwsc', 'dketchum')
@@ -105,6 +120,15 @@ if __name__ == '__main__':
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
     csv_files = os.path.join(c404, 'station_data')
-    extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
+
+    bounds = (-125.0, 25.0, -67.0, 53.0)
+    quadrants = get_quadrants(bounds)
+    sixteens = [get_quadrants(b) for b in quadrants]
+    sixteens = [i for l in sixteens for i in l]
+
+    for e, quad in enumerate(quadrants, start=1):
+        print(f'\n\n\n\n Quadrant {e} \n\n\n\n')
+
+        extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
 
 # ========================= EOF ====================================================================
