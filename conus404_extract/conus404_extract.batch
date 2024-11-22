@@ -2,13 +2,13 @@
 
 #SBATCH --job-name=extract_conus404
 #SBATCH --nodes=1
-#SBATCH --ntasks=12
+#SBATCH --ntasks=36
 #SBATCH --partition=cpu
 #SBATCH --account=wymtwsc
 #SBATCH --time=12:00:00
 #SBATCH --output=conus_extract.out
 #SBATCH --mail-user=dketchum@usgs.gov
-#SBATCH --mem=384G
+#SBATCH --mem=500G
 
 date
 
