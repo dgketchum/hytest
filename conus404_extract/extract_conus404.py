@@ -1,17 +1,19 @@
 import calendar
 import logging
 import os
+import intake
 import concurrent.futures
 import numpy as np
 import pandas as pd
 import xarray as xr
-import xoak
 import dask
+import zarr
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
+import warnings
+warnings.filterwarnings("ignore", message="The return type of `Dataset.dims` will be changed to return a set of dimension names in future")
 
-
-def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bounds=None, mode='multi',
+def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None, mode='multi',
                      start_yr=2000, end_yr=2023):
     station_list = pd.read_csv(stations)
     if 'LAT' in station_list.columns:
@@ -33,31 +35,32 @@ def extract_conus404(stations, nc_data, out_data, workers=8, overwrite=False, bo
 
     dates = [(year, month, calendar.monthrange(year, month)[-1])
              for year in range(start_yr, end_yr + 1) for month in range(1, 13)]
-
+    
     if mode == 'debug':
         for date in dates:
-            get_month_met(nc_data, station_list, date, out_data, overwrite)
-        return
-
+            get_month_met(station_list, date, out_data, overwrite, bounds)
+    
     elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(get_month_met, nc_data, station_list, dt, out_data, overwrite)
+            futures = [executor.submit(get_month_met, station_list, dt, out_data, overwrite, bounds)
                        for dt in dates]
             concurrent.futures.wait(futures)
-
+    
     elif mode == 'dask':
         cluster = LocalCluster(n_workers=workers, memory_limit='32GB', threads_per_worker=1,
                                silence_logs=logging.ERROR)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
-        tasks = [dask.delayed(get_month_met)(nc_data, station_list, date, out_data, overwrite) for date in dates]
+        tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds) for date in
+                 dates]
         dask.compute(*tasks)
         client.close()
 
 
-def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
+def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None):
     """"""
+    import xoak
     year, month, month_end = date_
     date_string = '{}-{}'.format(year, str(month).rjust(2, '0'))
 
@@ -65,18 +68,21 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
     fids = station_list_.index.to_list()
     station_list_ = station_list_.to_xarray()
 
-    print(f'read zarr {date_string} ')
-    ds = xr.open_zarr(nc_data_, consolidated=True, chunks='auto')
-    print(f'select time {date_string} ')
+    hytest_cat = intake.open_catalog("https://raw.githubusercontent.com/hytest-org/hytest/main/dataset_catalog/hytest_intake_catalog.yml")
+    cat = hytest_cat['conus404-catalog']
+    dataset = 'conus404-hourly-onprem-hw'
+    ds = cat[dataset].to_dask() 
+    # extract crs meta before continuing to modify ds
+    bounds_proj = projected_coords(ds, bounds)
     ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
     ds = ds[variables]
-    print(f'index stations {date_string} ')
+    if bounds_ is not None:
+        ds = ds.sel(y=slice(bounds_proj[1], bounds_proj[3]),
+                    x=slice(bounds_proj[0], bounds_proj[2]))
     ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
     ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude)
     ds = xr.merge([station_list_, ds])
-
     all_df = ds.to_dataframe()
-    print(f'write {date_string} from dataframe...')
 
     try:
         ct = 0
@@ -92,7 +98,7 @@ def get_month_met(nc_data_, station_list_, date_, out_data, overwrite):
                 df_station.to_parquet(_file, index=False)
                 ct += 1
         if ct % 1000 == 0.:
-            print(f'{ct} for {date_string}')
+            print(f'{ct} of {len(fids)} for {date_string}')
     except Exception as exc:
         print(f'{date_string}: {exc}')
 
@@ -108,6 +114,24 @@ def get_quadrants(b):
     quadrant_se = (mid_longitude, b[1], b[2], mid_latitude)
     quadrants = [quadrant_nw, quadrant_ne, quadrant_sw, quadrant_se]
     return quadrants
+
+
+def projected_coords(dataset, bounds):
+    import pyproj
+    import cartopy.crs as ccrs
+    crs_info = dataset.crs
+    globe = ccrs.Globe(ellipse='sphere', semimajor_axis=6370000, semiminor_axis=6370000)
+    lcc = ccrs.LambertConformal(globe=globe,
+                                central_longitude=crs_info.longitude_of_central_meridian, 
+                                central_latitude=crs_info.latitude_of_projection_origin,
+                                standard_parallels=crs_info.standard_parallel)
+    lcc_wkt = lcc.to_wkt()
+    source_crs = 'epsg:4326'
+    transformer = pyproj.Transformer.from_crs(source_crs, lcc_wkt)
+    west, south, east, north = bounds
+    sw_x, sw_y = transformer.transform(south, west)
+    ne_x, ne_y = transformer.transform(north, east)
+    return sw_x, sw_y, ne_x, ne_y
 
 
 if __name__ == '__main__':
@@ -130,6 +154,6 @@ if __name__ == '__main__':
 
         print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
-        extract_conus404(sites, zarr_store, csv_files, workers=36, mode='dask')
+        extract_conus404(sites, csv_files, workers=36, mode='dask', bounds=sector)
 
 # ========================= EOF ====================================================================
