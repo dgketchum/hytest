@@ -11,6 +11,8 @@ import zarr
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
 import warnings
+import pyproj
+import cartopy.crs as ccrs
 
 warnings.filterwarnings("ignore",
                         message="The return type of `Dataset.dims` will be changed to return a set of dimension names in future")
@@ -42,12 +44,12 @@ def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None
 
     if mode == 'debug':
         for date in dates:
-            get_month_met(station_list, date, out_data, overwrite, bounds)
+            get_month_met(station_list, date, out_data, overwrite, bounds, output_target)
 
     elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(get_month_met, station_list, dt, out_data, overwrite, bounds, ouput_mode=output_target)
+                executor.submit(get_month_met, station_list, dt, out_data, overwrite, bounds, output_target)
                 for dt in dates]
             concurrent.futures.wait(futures)
 
@@ -57,7 +59,7 @@ def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
-        tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds, ouput_mode=output_target)
+        tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds, output_target)
                  for date in
                  dates]
         dask.compute(*tasks)
@@ -74,9 +76,7 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, outpu
         return
     date_string = '{}-{}'.format(year, str(month).rjust(2, '0'))
 
-    variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
     fids = station_list_.index.to_list()
-    station_list_ = station_list_.to_xarray()
 
     hytest_cat = intake.open_catalog(
         "https://raw.githubusercontent.com/hytest-org/hytest/main/dataset_catalog/hytest_intake_catalog.yml")
@@ -84,22 +84,33 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, outpu
     if output_mode == 'uncorrected':
         # model output, uncorrected
         dataset = 'conus404-hourly-onprem-hw'
+        variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
+        print('using uncorrected data')
     elif output_mode == 'ba':
+        variables = ['RAINRATE', 'T2D']
         # bias-adjusted for precip and temp
         dataset = 'conus404-hourly-ba-onprem-hw'
+        print('using bias-adjusted data')
     else:
         raise ValueError('output_mode not recognized')
 
     ds = cat[dataset].to_dask()
     # extract crs meta before continuing to modify ds
-    bounds_proj = projected_coords(ds, bounds)
+    bounds_proj = projected_coords(row=None, _bounds=bounds)
     ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
     ds = ds[variables]
     if bounds_ is not None:
         ds = ds.sel(y=slice(bounds_proj[1], bounds_proj[3]),
                     x=slice(bounds_proj[0], bounds_proj[2]))
-    ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
-    ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude, tolerance=4000)
+    if output_mode == 'uncorrected':
+        station_list_ = station_list_.to_xarray()
+        ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
+        ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude, tolerance=4000)
+    else:
+        station_list_[['x', 'y']] = station_list_.apply(projected_coords, axis=1, result_type='expand')
+        station_list_ = station_list_.to_xarray()
+        ds = ds.sel(y=station_list_.y, x=station_list_.x, method='nearest', tolerance=4000)
+
     ds = xr.merge([station_list_, ds])
     all_df = ds.to_dataframe()
 
@@ -135,22 +146,23 @@ def get_quadrants(b):
     return quadrants
 
 
-def projected_coords(dataset, bounds):
-    import pyproj
-    import cartopy.crs as ccrs
-    crs_info = dataset.crs
+def projected_coords(row, _bounds=None):
     globe = ccrs.Globe(ellipse='sphere', semimajor_axis=6370000, semiminor_axis=6370000)
     lcc = ccrs.LambertConformal(globe=globe,
-                                central_longitude=crs_info.longitude_of_central_meridian,
-                                central_latitude=crs_info.latitude_of_projection_origin,
-                                standard_parallels=crs_info.standard_parallel)
+                                central_longitude=-97.9000015258789,
+                                central_latitude=39.100006103515625,
+                                standard_parallels=[30.0, 50.0])
     lcc_wkt = lcc.to_wkt()
     source_crs = 'epsg:4326'
     transformer = pyproj.Transformer.from_crs(source_crs, lcc_wkt)
-    west, south, east, north = bounds
-    sw_x, sw_y = transformer.transform(south, west)
-    ne_x, ne_y = transformer.transform(north, east)
-    return sw_x, sw_y, ne_x, ne_y
+    if _bounds is not None:
+        west, south, east, north = _bounds
+        sw_x, sw_y = transformer.transform(south, west)
+        ne_x, ne_y = transformer.transform(north, east)
+        return sw_x, sw_y, ne_x, ne_y
+    else:
+        x, y = transformer.transform(row['longitude'], row['latitude'])
+        return x, y
 
 
 if __name__ == '__main__':
@@ -167,7 +179,12 @@ if __name__ == '__main__':
 
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
-    csv_files = os.path.join(c404, 'station_data')
+
+    model_target = 'ba'
+    if model_target == 'ba':
+        csv_files = os.path.join(c404, 'station_data_ba')
+    else:
+        csv_files = os.path.join(c404, 'station_data')
 
     bounds = (-125.0, 25.0, -67.0, 53.0)
     quadrants = get_quadrants(bounds)
@@ -177,6 +194,6 @@ if __name__ == '__main__':
     for e, sector in enumerate(sixteens, start=1):
         print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
-        extract_conus404(sites, csv_files, workers=36, mode='dask', bounds=sector)
+        extract_conus404(sites, csv_files, workers=18, mode='debug', bounds=sector, output_target=model_target)
 
 # ========================= EOF ====================================================================
