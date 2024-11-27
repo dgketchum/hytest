@@ -11,10 +11,13 @@ import zarr
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
 import warnings
-warnings.filterwarnings("ignore", message="The return type of `Dataset.dims` will be changed to return a set of dimension names in future")
+
+warnings.filterwarnings("ignore",
+                        message="The return type of `Dataset.dims` will be changed to return a set of dimension names in future")
+
 
 def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None, mode='multi',
-                     start_yr=2000, end_yr=2023):
+                     start_yr=2000, end_yr=2022, output_target='uncorrected'):
     station_list = pd.read_csv(stations)
     if 'LAT' in station_list.columns:
         station_list = station_list.rename(columns={'STAID': 'fid', 'LAT': 'latitude', 'LON': 'longitude'})
@@ -32,46 +35,62 @@ def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None
         print('dropped {} stations outside NLDAS-2 extent'.format(ln - station_list.shape[0]))
 
     print(f'{len(station_list)} stations to write')
+    print(f'sample stations for the selected region:\n {station_list.sample(n=5)}')
 
     dates = [(year, month, calendar.monthrange(year, month)[-1])
              for year in range(start_yr, end_yr + 1) for month in range(1, 13)]
-    
+
     if mode == 'debug':
         for date in dates:
             get_month_met(station_list, date, out_data, overwrite, bounds)
-    
+
     elif mode == 'multi':
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(get_month_met, station_list, dt, out_data, overwrite, bounds)
-                       for dt in dates]
+            futures = [
+                executor.submit(get_month_met, station_list, dt, out_data, overwrite, bounds, ouput_mode=output_target)
+                for dt in dates]
             concurrent.futures.wait(futures)
-    
+
     elif mode == 'dask':
         cluster = LocalCluster(n_workers=workers, memory_limit='32GB', threads_per_worker=1,
                                silence_logs=logging.ERROR)
         client = Client(cluster)
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
-        tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds) for date in
+        tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds, ouput_mode=output_target)
+                 for date in
                  dates]
         dask.compute(*tasks)
         client.close()
 
 
-def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None):
+def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, output_mode='uncorrected'):
     """"""
     import xoak
     year, month, month_end = date_
+
+    # dataset 1979 to 2022-10-01
+    if year == 2022 and month > 9:
+        return
     date_string = '{}-{}'.format(year, str(month).rjust(2, '0'))
 
     variables = ['T2', 'TD2', 'QVAPOR', 'U10', 'V10', 'PSFC', 'ACSWDNLSM']
     fids = station_list_.index.to_list()
     station_list_ = station_list_.to_xarray()
 
-    hytest_cat = intake.open_catalog("https://raw.githubusercontent.com/hytest-org/hytest/main/dataset_catalog/hytest_intake_catalog.yml")
+    hytest_cat = intake.open_catalog(
+        "https://raw.githubusercontent.com/hytest-org/hytest/main/dataset_catalog/hytest_intake_catalog.yml")
     cat = hytest_cat['conus404-catalog']
-    dataset = 'conus404-hourly-onprem-hw'
-    ds = cat[dataset].to_dask() 
+    if output_mode == 'uncorrected':
+        # model output, uncorrected
+        dataset = 'conus404-hourly-onprem-hw'
+    elif output_mode == 'ba':
+        # bias-adjusted for precip and temp
+        dataset = 'conus404-hourly-ba-onprem-hw'
+    else:
+        raise ValueError('output_mode not recognized')
+
+    ds = cat[dataset].to_dask()
     # extract crs meta before continuing to modify ds
     bounds_proj = projected_coords(ds, bounds)
     ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
@@ -80,7 +99,7 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None):
         ds = ds.sel(y=slice(bounds_proj[1], bounds_proj[3]),
                     x=slice(bounds_proj[0], bounds_proj[2]))
     ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
-    ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude)
+    ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude, tolerance=4000)
     ds = xr.merge([station_list_, ds])
     all_df = ds.to_dataframe()
 
@@ -122,7 +141,7 @@ def projected_coords(dataset, bounds):
     crs_info = dataset.crs
     globe = ccrs.Globe(ellipse='sphere', semimajor_axis=6370000, semiminor_axis=6370000)
     lcc = ccrs.LambertConformal(globe=globe,
-                                central_longitude=crs_info.longitude_of_central_meridian, 
+                                central_longitude=crs_info.longitude_of_central_meridian,
                                 central_latitude=crs_info.latitude_of_projection_origin,
                                 standard_parallels=crs_info.standard_parallel)
     lcc_wkt = lcc.to_wkt()
@@ -137,6 +156,11 @@ def projected_coords(dataset, bounds):
 if __name__ == '__main__':
     r = '/caldera/hovenweep/projects/usgs/water'
     d = os.path.join(r, 'wymtwsc', 'dketchum')
+
+    if not os.path.isdir(d):
+        home = os.path.expanduser('~')
+        d = os.path.join(home, 'data', 'IrrigationGIS')
+
     c404 = os.path.join(d, 'conus404')
     dads = os.path.join(d, 'dads')
     ghcn = os.path.join(d, 'climate', 'ghcn')
@@ -151,7 +175,6 @@ if __name__ == '__main__':
     sixteens = [x for xs in sixteens for x in xs]
 
     for e, sector in enumerate(sixteens, start=1):
-
         print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
         extract_conus404(sites, csv_files, workers=36, mode='dask', bounds=sector)
