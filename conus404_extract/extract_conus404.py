@@ -96,7 +96,7 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, outpu
 
     ds = cat[dataset].to_dask()
     # extract crs meta before continuing to modify ds
-    bounds_proj = projected_coords(row=None, _bounds=bounds)
+    bounds_proj = projected_coords(row=None, _bounds=bounds, buffer=10000.)
     ds = ds.sel(time=slice(f'{year}-{month}-01', f'{year}-{month}-{month_end}'))
     ds = ds[variables]
     if bounds_ is not None:
@@ -104,29 +104,53 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, outpu
                     x=slice(bounds_proj[0], bounds_proj[2]))
     if output_mode == 'uncorrected':
         station_list_ = station_list_.to_xarray()
+        # Add 'within_bounds' column (lat/lon)
+        station_list_['within_bounds'] = (
+                (station_list_.latitude >= ds.lat.min()) &
+                (station_list_.latitude <= ds.lat.max()) &
+                (station_list_.longitude >= ds.lon.min()) &
+                (station_list_.longitude <= ds.lon.max()))
         ds.xoak.set_index(['lat', 'lon'], 'sklearn_geo_balltree')
         ds = ds.xoak.sel(lat=station_list_.latitude, lon=station_list_.longitude, tolerance=4000)
     else:
-        station_list_[['x', 'y']] = station_list_.apply(projected_coords, axis=1, result_type='expand')
+        station_list_[['xs', 'ys']] = station_list_.apply(projected_coords, axis=1, result_type='expand')
         station_list_ = station_list_.to_xarray()
-        ds = ds.sel(y=station_list_.y, x=station_list_.x, method='nearest', tolerance=4000)
+        # Add 'within_bounds' column (x/y)
+        station_list_['within_bounds'] = (
+                (station_list_.ys >= ds.y.min()) &
+                (station_list_.ys <= ds.y.max()) &
+                (station_list_.xs >= ds.x.min()) &
+                (station_list_.xs <= ds.x.max()))
+        try:
+            ds = ds.sel(y=station_list_.ys, x=station_list_.xs, method='nearest', tolerance=4000)
+        except KeyError as exc:
+            print(f"KeyError: {exc}")
+            print(bounds_proj)
+            print(bounds)
+            print("Problematic y values:", np.array(station_list_.ys)[~np.isin(station_list_.ys, ds.y)])
+            print(ds)
+            return
 
     ds = xr.merge([station_list_, ds])
     all_df = ds.to_dataframe()
+    print(f'to data frame {date_string}')
 
     try:
         ct = 0
-        for fid in fids:
+        for enum, fid in enumerate(fids, start=1):
+            print(f'{enum}: {ct} of {len(fids)}')
             dst_dir = os.path.join(out_data, fid)
             if not os.path.exists(dst_dir):
                 os.mkdir(dst_dir)
             _file = os.path.join(dst_dir, f'{fid}_{date_string}.parquet')
             if not os.path.exists(_file) or overwrite:
+                print(f'extract {fid} for {date_string}')
                 df_station = all_df.loc[slice(fid), slice(None)].copy()
                 df_station = df_station.groupby(df_station.index.get_level_values('time')).first()
                 df_station['dt'] = [i.strftime('%Y%m%d%H') for i in df_station.index]
                 df_station.to_parquet(_file, index=False)
                 ct += 1
+                print(f'wrote {_file}')
         if ct % 1000 == 0.:
             print(f'{ct} of {len(fids)} for {date_string}')
     except Exception as exc:
@@ -146,7 +170,7 @@ def get_quadrants(b):
     return quadrants
 
 
-def projected_coords(row, _bounds=None):
+def projected_coords(row, _bounds=None, buffer=None):
     globe = ccrs.Globe(ellipse='sphere', semimajor_axis=6370000, semiminor_axis=6370000)
     lcc = ccrs.LambertConformal(globe=globe,
                                 central_longitude=-97.9000015258789,
@@ -159,10 +183,14 @@ def projected_coords(row, _bounds=None):
         west, south, east, north = _bounds
         sw_x, sw_y = transformer.transform(south, west)
         ne_x, ne_y = transformer.transform(north, east)
-        return sw_x, sw_y, ne_x, ne_y
+        if buffer:
+            return sw_x - buffer, sw_y - buffer, ne_x + buffer, ne_y + buffer
+        else:
+            return sw_x, sw_y, ne_x, ne_y
     else:
-        x, y = transformer.transform(row['longitude'], row['latitude'])
+        x, y = transformer.transform( row['latitude'], row['longitude'])
         return x, y
+
 
 
 if __name__ == '__main__':
