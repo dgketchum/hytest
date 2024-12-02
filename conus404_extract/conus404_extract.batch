@@ -5,7 +5,7 @@
 #SBATCH --ntasks=36
 #SBATCH --partition=cpu
 #SBATCH --account=wymtwsc
-#SBATCH --time=01:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=conus_extract.out
 #SBATCH --mail-user=dketchum@usgs.gov
 #SBATCH --mem=500G

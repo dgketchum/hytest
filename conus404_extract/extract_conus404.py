@@ -60,8 +60,7 @@ def extract_conus404(stations, out_data, workers=8, overwrite=False, bounds=None
         print("Dask cluster started with dashboard at:", client.dashboard_link)
         station_list = client.scatter(station_list)
         tasks = [dask.delayed(get_month_met)(station_list, date, out_data, overwrite, bounds, output_target)
-                 for date in
-                 dates]
+                 for date in dates]
         dask.compute(*tasks)
         client.close()
 
@@ -150,7 +149,6 @@ def get_month_met(station_list_, date_, out_data, overwrite, bounds_=None, outpu
                 df_station['dt'] = [i.strftime('%Y%m%d%H') for i in df_station.index]
                 df_station.to_parquet(_file, index=False)
                 ct += 1
-                print(f'wrote {_file}')
         if ct % 1000 == 0.:
             print(f'{ct} of {len(fids)} for {date_string}')
     except Exception as exc:
@@ -222,6 +220,9 @@ if __name__ == '__main__':
     for e, sector in enumerate(sixteens, start=1):
         print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
-        extract_conus404(sites, csv_files, workers=18, mode='debug', bounds=sector, output_target=model_target)
+        if sector < 3:
+            continue
+
+        extract_conus404(sites, csv_files, workers=18, mode='dask', bounds=sector, output_target=model_target)
 
 # ========================= EOF ====================================================================
