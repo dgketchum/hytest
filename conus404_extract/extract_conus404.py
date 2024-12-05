@@ -221,7 +221,7 @@ if __name__ == '__main__':
     for e, sector in enumerate(sixteens, start=1):
         print(f'\n\n\n\n Sector {e} of {len(sixteens)} \n\n\n\n')
 
-        if sector < 3:
+        if e < 3:
             continue
 
         extract_conus404(sites, csv_files, workers=18, mode='dask', bounds=sector, output_target=model_target)
