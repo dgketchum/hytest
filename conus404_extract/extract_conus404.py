@@ -205,6 +205,7 @@ if __name__ == '__main__':
 
     zarr_store = os.path.join(r, 'impd/hytest/conus404/conus404_hourly.zarr')
     sites = os.path.join(dads, 'met', 'stations', 'madis_29OCT2024.csv')
+    # sites = os.path.join(ghcn, 'stations', 'ghcn_CANUSA_stations_mgrs.csv')
 
     model_target = 'ba'
     if model_target == 'ba':
